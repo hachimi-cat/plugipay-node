@@ -216,5 +216,23 @@ describe('gift cards / store credit', () => {
   });
 });
 
+describe('204 no-body responses', () => {
+  // Every backend DELETE answers 204 with an empty body. The parser
+  // must treat that as void, not as a non-JSON envelope.
+  it('delete resolves void on 204 instead of throwing invalid_response', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
+    try {
+      const client = new PlugipayClient({ keyId: 'ak_test', secret: 'sk_test', baseUrl: 'https://plugipay.test' });
+      await expect(client.webhookEndpoints.delete('we_1')).resolves.toBeUndefined();
+      await expect(
+        client.request({ method: 'DELETE', path: '/api/v1/customers/cus_1' }),
+      ).resolves.toBeUndefined();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
 // vitest globals
 import { afterEach } from 'vitest';

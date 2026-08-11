@@ -157,6 +157,9 @@ export class PlugipayClient {
     clearTimeout(timer);
 
     const text = await res.text();
+    // DELETE-style endpoints answer 204 with no body — there is no
+    // envelope to parse and nothing to return.
+    if (res.status === 204 || (res.ok && text === '')) return undefined as T;
     let env: ApiEnvelope<T>;
     try { env = JSON.parse(text) as ApiEnvelope<T>; }
     catch { throw new PlugipayError(res.status, 'invalid_response', `Non-JSON response: ${text.slice(0, 200)}`); }

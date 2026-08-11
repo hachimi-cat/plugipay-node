@@ -1,6 +1,6 @@
 {
   "name": "@forjio/plugipay-node",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Official Node.js SDK for Plugipay — hosted checkout, subscriptions, invoices, receipts, refunds, gift cards & store credit, webhooks, adapters (Xendit/PayPal/Midtrans/Manual), templates, uploads, workspaces, API keys, billing, account management, admin portal. Platform-partner mode for Storlaunch/Fulkruma/Ripllo.",
   "type": "module",
   "main": "./dist/index.cjs",
