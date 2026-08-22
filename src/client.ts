@@ -444,11 +444,23 @@ export class PlugipayClient {
 
   // ─── Refunds ────────────────────────────────────────────────
   refunds = {
+    /** Send money back to the buyer through the PSP that took it.
+     *
+     *  Name the charge either way: `sourceType` + `sourceId` for the
+     *  checkout session (what most callers hold), or `chargeId` for the
+     *  gateway's own payment id.
+     *
+     *  A provider that refuses the refund answers 422 with its own
+     *  reason — the Refund row is kept as `failed`, and no ledger
+     *  movement is recorded. Only `succeeded` means the buyer is
+     *  actually getting their money. */
     create: (input: {
-      sourceType: 'checkout_session' | 'invoice';
-      sourceId: string;
+      sourceType?: 'checkout_session' | 'invoice';
+      sourceId?: string;
+      chargeId?: string;
       amount?: number;
-      reason?: string;
+      reason?: 'duplicate' | 'fraudulent' | 'requested_by_customer' | 'other';
+      metadata?: Record<string, string> | null;
     }) =>
       this.request<Refund>({ method: 'POST', path: '/api/v1/refunds', body: input, idempotencyKey: this.genIdem() }),
     get: (id: string) => this.request<Refund>({ method: 'GET', path: `/api/v1/refunds/${id}` }),
