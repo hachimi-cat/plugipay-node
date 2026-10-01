@@ -124,10 +124,39 @@ describe('v0.5.0 new resources', () => {
     expect(h.captured[0]!.method).toBe('POST');
   });
 
-  it('workspaces.create POSTs', async () => {
-    await h.client.workspaces.create({ brandName: 'NewBrand' });
+  it('workspaces.create / update send the name Huudis reads', async () => {
+    await h.client.workspaces.create({ name: 'Toko' });
+    await h.client.workspaces.update('acc_1', { name: 'Toko Dua' });
     expect(h.captured[0]!.method).toBe('POST');
     expect(h.captured[0]!.url).toContain('/api/v1/workspaces');
+    expect(JSON.parse(h.captured[0]!.body!)).toEqual({ name: 'Toko' });
+    expect(h.captured[1]!.method).toBe('PATCH');
+    expect(JSON.parse(h.captured[1]!.body!)).toEqual({ name: 'Toko Dua' });
+  });
+
+  it('account.changeEmail sends email (Huudis does not read newEmail)', async () => {
+    await h.client.account.changeEmail({ email: 'new@example.com', password: 'pw' });
+    expect(JSON.parse(h.captured[0]!.body!)).toEqual({ email: 'new@example.com', password: 'pw' });
+  });
+
+  it('account.changePassword may leave out the current password', async () => {
+    await h.client.account.changePassword({ newPassword: 'a-long-new-password' });
+    expect(JSON.parse(h.captured[0]!.body!)).toEqual({ newPassword: 'a-long-new-password' });
+  });
+
+  it('subscriptions.update PATCHes; cancel can carry a reason', async () => {
+    await h.client.subscriptions.update('sub_1', { metadata: { seats: '12' } });
+    await h.client.subscriptions.cancel('sub_1', 'now', 'merchant');
+    expect(h.captured[0]!.method).toBe('PATCH');
+    expect(h.captured[0]!.url).toContain('/api/v1/subscriptions/sub_1');
+    expect(JSON.parse(h.captured[0]!.body!)).toEqual({ metadata: { seats: '12' } });
+    expect(JSON.parse(h.captured[1]!.body!)).toEqual({ at: 'now', reason: 'merchant' });
+  });
+
+  it('customers.delete DELETEs', async () => {
+    await h.client.customers.delete('cus_1');
+    expect(h.captured[0]!.method).toBe('DELETE');
+    expect(h.captured[0]!.url).toContain('/api/v1/customers/cus_1');
   });
 
   it('account.revokeAllSessions POSTs', async () => {

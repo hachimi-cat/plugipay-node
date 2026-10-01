@@ -55,7 +55,15 @@ import {
   Workspace,
   AccountProfile,
   BrowserSession,
-  LinkedAccount,
+  LinkedAccounts,
+  AccountProfileUpdate,
+  WorkspaceRename,
+  WorkspaceDeletion,
+  PartnerId,
+  RefundReason,
+  SubscriptionCancelReason,
+  SubscriptionStatus,
+  CheckoutSessionStatus,
   WorkspaceMember,
   BillingTier,
   CheckoutSettings,
@@ -286,11 +294,19 @@ export class PlugipayClient {
   // ─── Resources ──────────────────────────────────────────────
 
   customers = {
-    create: (input: { email?: string; name?: string; phone?: string; externalId?: string; metadata?: Record<string, string> }) =>
+    create: (input: {
+      email?: string;
+      name?: string;
+      phone?: string;
+      externalId?: string;
+      taxId?: string;
+      defaultPaymentTokenId?: string;
+      metadata?: Record<string, string> | null;
+    }) =>
       this.request<Customer>({ method: 'POST', path: '/api/v1/customers', body: input, idempotencyKey: this.genIdem() }),
     get: (id: string) =>
       this.request<Customer>({ method: 'GET', path: `/api/v1/customers/${id}` }),
-    list: (params: { limit?: number; cursor?: string; email?: string } = {}) =>
+    list: (params: { limit?: number; cursor?: string; order?: 'asc' | 'desc'; email?: string; externalId?: string; createdAfter?: string } = {}) =>
       this.requestList<Customer>({
         method: 'GET',
         path: `/api/v1/customers${qs(params)}`,
@@ -309,6 +325,10 @@ export class PlugipayClient {
       },
     ) =>
       this.request<Customer>({ method: 'PATCH', path: `/api/v1/customers/${id}`, body: patch, idempotencyKey: this.genIdem() }),
+    /** Delete a customer with no money history (409 when subscriptions, invoices, paid or
+     *  in-flight checkout sessions, or gift cards hold it). */
+    delete: (id: string) =>
+      this.request<void>({ method: 'DELETE', path: `/api/v1/customers/${id}`, idempotencyKey: this.genIdem() }),
   };
 
   plans = {
@@ -368,7 +388,8 @@ export class PlugipayClient {
         idempotencyKey: this.genIdem(),
       }),
     get: (id: string) => this.request<CheckoutSession>({ method: 'GET', path: `/api/v1/checkout-sessions/${id}` }),
-    list: (params: { limit?: number; status?: string; customerId?: string } = {}) =>
+    /** `createdAfter` / `createdBefore`: ISO-8601 bounds on `createdAt`. */
+    list: (params: { limit?: number; cursor?: string; order?: 'asc' | 'desc'; status?: CheckoutSessionStatus; customerId?: string; createdAfter?: string; createdBefore?: string } = {}) =>
       this.requestList<CheckoutSession>({
         method: 'GET',
         path: `/api/v1/checkout-sessions${qs(params)}`,
@@ -417,13 +438,17 @@ export class PlugipayClient {
     }) =>
       this.request<Subscription>({ method: 'POST', path: '/api/v1/subscriptions', body: input, idempotencyKey: this.genIdem() }),
     get: (id: string) => this.request<Subscription>({ method: 'GET', path: `/api/v1/subscriptions/${id}` }),
-    list: (params: { limit?: number; status?: string; customerId?: string; planId?: string } = {}) =>
+    /** Change its price, default payment method or metadata (`metadata: null` clears it). */
+    update: (id: string, patch: { priceId?: string; defaultPaymentTokenId?: string; metadata?: Record<string, string> | null }) =>
+      this.request<Subscription>({ method: 'PATCH', path: `/api/v1/subscriptions/${id}`, body: patch, idempotencyKey: this.genIdem() }),
+    list: (params: { limit?: number; cursor?: string; order?: 'asc' | 'desc'; status?: SubscriptionStatus; customerId?: string; planId?: string } = {}) =>
       this.requestList<Subscription>({
         method: 'GET',
         path: `/api/v1/subscriptions${qs(params)}`,
       }),
-    cancel: (id: string, at: 'now' | 'period_end' = 'period_end') =>
-      this.request<Subscription>({ method: 'POST', path: `/api/v1/subscriptions/${id}/cancel`, body: { at }, idempotencyKey: this.genIdem() }),
+    /** `period_end` (the default) sets `cancelAt`; `now` cancels at once. */
+    cancel: (id: string, at: 'now' | 'period_end' = 'period_end', reason?: SubscriptionCancelReason) =>
+      this.request<Subscription>({ method: 'POST', path: `/api/v1/subscriptions/${id}/cancel`, body: reason ? { at, reason } : { at }, idempotencyKey: this.genIdem() }),
     pause: (id: string, resumeAt?: string) =>
       this.request<Subscription>({ method: 'POST', path: `/api/v1/subscriptions/${id}/pause`, body: resumeAt ? { resumeAt } : {}, idempotencyKey: this.genIdem() }),
     resume: (id: string) => this.request<Subscription>({ method: 'POST', path: `/api/v1/subscriptions/${id}/resume`, body: {}, idempotencyKey: this.genIdem() }),
@@ -543,12 +568,14 @@ export class PlugipayClient {
       sourceId?: string;
       chargeId?: string;
       amount?: number;
-      reason?: 'duplicate' | 'fraudulent' | 'requested_by_customer' | 'other';
+      reason?: RefundReason;
       metadata?: Record<string, string> | null;
     }) =>
       this.request<Refund>({ method: 'POST', path: '/api/v1/refunds', body: input, idempotencyKey: this.genIdem() }),
     get: (id: string) => this.request<Refund>({ method: 'GET', path: `/api/v1/refunds/${id}` }),
-    list: (params: { limit?: number; cursor?: string; status?: RefundStatus; sourceId?: string } = {}) =>
+    /** Refunds in the key's mode, newest first; `chargeId` lists one payment's refunds (a
+     *  checkout session's `paymentId`, or its own id for a manual payment). */
+    list: (params: { limit?: number; cursor?: string; order?: 'asc' | 'desc'; status?: RefundStatus; chargeId?: string } = {}) =>
       this.requestList<Refund>({ method: 'GET', path: `/api/v1/refunds${qs(params)}` }),
   };
 
@@ -763,12 +790,15 @@ export class PlugipayClient {
    *  person-only (they change the owner's Huudis account): 403 person_only with a key. */
   workspaces = {
     list: () => this.request<Workspace[]>({ method: 'GET', path: '/api/v1/workspaces' }),
-    create: (input: { brandName?: string; businessEmail?: string }) =>
+    /** A new workspace you own, named `name` (its slug is made from the name). */
+    create: (input: { name: string }) =>
       this.request<Workspace>({ method: 'POST', path: '/api/v1/workspaces', body: input, idempotencyKey: this.genIdem() }),
-    update: (id: string, patch: Partial<{ brandName: string; businessEmail: string }>) =>
-      this.request<Workspace>({ method: 'PATCH', path: `/api/v1/workspaces/${id}`, body: patch }),
+    /** Rename a workspace (owners and admins). */
+    update: (id: string, patch: { name: string }) =>
+      this.request<WorkspaceRename>({ method: 'PATCH', path: `/api/v1/workspaces/${id}`, body: patch }),
+    /** Schedule the workspace's deletion (owners only); it happens at `pendingDeletionAt`. */
     delete: (id: string) =>
-      this.request<void>({ method: 'DELETE', path: `/api/v1/workspaces/${id}` }),
+      this.request<WorkspaceDeletion>({ method: 'DELETE', path: `/api/v1/workspaces/${id}` }),
   };
 
   // ─── Account (merchant profile + sessions + linked) ────────
@@ -776,20 +806,27 @@ export class PlugipayClient {
    *  signed-in session; the API answers a key here with 403 person_only. */
   account = {
     get: () => this.request<AccountProfile>({ method: 'GET', path: '/api/v1/account' }),
-    update: (patch: Partial<{ name: string }>) =>
-      this.request<AccountProfile>({ method: 'PATCH', path: '/api/v1/account', body: patch }),
+    /** Change the name (`null` clears it) or locale; answers with those fields. */
+    update: (patch: { name?: string | null; locale?: string }) =>
+      this.request<AccountProfileUpdate>({ method: 'PATCH', path: '/api/v1/account', body: patch }),
     listSessions: () => this.request<BrowserSession[]>({ method: 'GET', path: '/api/v1/account/sessions' }),
+    /** Sign out one session (not the current one: 400 CANNOT_REVOKE_CURRENT). */
     revokeSession: (id: string) =>
-      this.request<void>({ method: 'POST', path: `/api/v1/account/sessions/${id}/revoke`, body: {} }),
+      this.request<{ revoked: boolean }>({ method: 'POST', path: `/api/v1/account/sessions/${id}/revoke`, body: {} }),
+    /** Sign out every other session. */
     revokeAllSessions: () =>
-      this.request<{ revoked: number }>({ method: 'POST', path: '/api/v1/account/sessions/revoke-all', body: {} }),
-    listLinked: () => this.request<LinkedAccount[]>({ method: 'GET', path: '/api/v1/account/linked-accounts' }),
+      this.request<{ revokedCount: number }>({ method: 'POST', path: '/api/v1/account/sessions/revoke-all', body: {} }),
+    listLinked: () => this.request<LinkedAccounts>({ method: 'GET', path: '/api/v1/account/linked-accounts' }),
+    /** Unlink a sign-in: `provider` is `google` or `apple`. */
     unlink: (provider: string) =>
-      this.request<void>({ method: 'DELETE', path: `/api/v1/account/linked-accounts/${provider}` }),
-    changeEmail: (input: { newEmail: string; password: string }) =>
-      this.request<{ pendingVerification: boolean }>({ method: 'POST', path: '/api/v1/account/email-change', body: input }),
-    changePassword: (input: { currentPassword: string; newPassword: string }) =>
-      this.request<void>({ method: 'POST', path: '/api/v1/account/password-change', body: input }),
+      this.request<{ removed: boolean; provider: string }>({ method: 'DELETE', path: `/api/v1/account/linked-accounts/${provider}` }),
+    /** Start an email change: a link goes to the new address. `password` is the current
+     *  one (ignored for a person without a password). */
+    changeEmail: (input: { email: string; password: string }) =>
+      this.request<{ pending: boolean; newEmail: string }>({ method: 'POST', path: '/api/v1/account/email-change', body: input }),
+    /** `currentPassword` is required unless the person has none yet (Google / Apple only). */
+    changePassword: (input: { currentPassword?: string; newPassword: string }) =>
+      this.request<{ changed: boolean }>({ method: 'POST', path: '/api/v1/account/password-change', body: input }),
     listMembers: () => this.request<WorkspaceMember[]>({ method: 'GET', path: '/api/v1/account/members' }),
   };
 
@@ -814,14 +851,14 @@ export class PlugipayClient {
   admin = {
     provisionWorkspace: (input: {
       accountId: string;
-      partner: 'storlaunch' | 'fulkruma' | 'ripllo';
+      partner: PartnerId;
       discountRate: number;
       brandName?: string;
       businessEmail?: string;
     }) => this.request<PartnerWorkspace>({ method: 'POST', path: '/api/v1/admin/workspaces', body: input }),
     getWorkspace: (accountId: string) =>
       this.request<PartnerWorkspace>({ method: 'GET', path: `/api/v1/admin/workspaces/${accountId}` }),
-    partnerUsage: (params: { partner: 'storlaunch' | 'fulkruma' | 'ripllo'; from: string; to: string }) =>
+    partnerUsage: (params: { partner: PartnerId; from: string; to: string }) =>
       this.request<PartnerUsageSummary>({
         method: 'GET',
         path: `/api/v1/admin/partner/usage${qs(params)}`,

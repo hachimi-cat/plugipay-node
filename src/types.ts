@@ -28,11 +28,17 @@ export type CheckoutMethod = 'qris' | 'va' | 'ewallet' | 'card' | 'retail' | 'pa
 
 export interface Customer {
   id: string;
+  arn: string;
   accountId: string;
+  /** Your own id for the customer (e.g. a Storlaunch `cus_…`); unique per account and mode. */
+  externalId: string | null;
   email: string | null;
   name: string | null;
   phone: string | null;
-  externalId: string | null;
+  /** Tax id (NPWP in Indonesia). */
+  taxId: string | null;
+  defaultPaymentTokenId: string | null;
+  metadata: Record<string, string> | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -120,14 +126,39 @@ export interface PlanCreateInput {
   metadata?: Record<string, string> | null;
 }
 
+export type CheckoutSessionStatus =
+  | 'open'
+  | 'pending'
+  | 'pending_review'
+  | 'completed'
+  | 'failed'
+  | 'expired'
+  | 'canceled';
+
+/** The customer a checkout session is for, as the session shows it. */
+export interface CheckoutSessionCustomer {
+  id: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  externalId: string | null;
+}
+
 export interface CheckoutSession {
   id: string;
+  arn: string;
   accountId: string;
+  /** The workspace's display name, where the response carries it (null otherwise). */
+  workspaceName: string | null;
   customerId: string | null;
+  customer: CheckoutSessionCustomer | null;
+  mode: Mode;
+  status: CheckoutSessionStatus;
   amount: number;
   currency: CurrencyCode;
-  status: 'open' | 'pending' | 'completed' | 'expired' | 'canceled' | 'pending_review';
   methods: CheckoutMethod[];
+  /** The method the buyer paid with (`qris`, `bank_transfer`, …), once known. */
+  paymentMethod: string | null;
   adapter: string | null;
   lineItems: unknown;
   successUrl: string;
@@ -135,6 +166,8 @@ export interface CheckoutSession {
   hostedUrl: string;
   expiresAt: string;
   completedAt: string | null;
+  /** The provider's charge id once paid — what `refunds.create({ chargeId })` takes. */
+  paymentId: string | null;
   metadata: Record<string, string> | null;
   createdAt: string;
   updatedAt: string;
@@ -142,8 +175,10 @@ export interface CheckoutSession {
 
 export interface Invoice {
   id: string;
+  arn: string;
   accountId: string;
   customerId: string;
+  subscriptionId: string | null;
   status: 'draft' | 'open' | 'past_due' | 'paid' | 'void' | 'uncollectible';
   number: string;
   currency: CurrencyCode;
@@ -156,8 +191,15 @@ export interface Invoice {
   dueAt: string | null;
   issuedAt: string | null;
   paidAt: string | null;
+  voidedAt: string | null;
   hostedInvoiceUrl: string | null;
+  /** The provider charge that settled the invoice — set on `invoices.get` when a checkout
+   *  session paid it (null in lists, events, and when it was paid any other way). Pass it
+   *  to `refunds.create({ chargeId })`; null means it can't be refunded through a provider. */
+  chargeId: string | null;
+  collectionAttempts: number;
   lines: InvoiceLine[];
+  metadata: Record<string, string> | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -168,33 +210,67 @@ export interface InvoiceLine {
   quantity: number;
   unitAmount: number;
   amount: number;
+  priceId: string | null;
+  metadata: Record<string, string> | null;
 }
+
+export type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'canceled' | 'paused' | 'incomplete';
+export type SubscriptionCancelReason = 'customer_portal' | 'merchant' | 'failed_payment' | 'user_request';
 
 export interface Subscription {
   id: string;
+  arn: string;
   accountId: string;
   customerId: string;
   planId: string;
-  status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'paused' | 'incomplete';
+  priceId: string | null;
+  status: SubscriptionStatus;
   currentPeriodStart: string;
   currentPeriodEnd: string;
-  cancelAtPeriodEnd: boolean;
-  trialEndsAt: string | null;
+  /** When the trial ends; null without a trial. */
+  trialEnd: string | null;
+  /** Set by `cancel(id, 'period_end')`: the subscription cancels then. */
+  cancelAt: string | null;
+  canceledAt: string | null;
+  canceledReason: SubscriptionCancelReason | null;
+  pausedAt: string | null;
+  defaultPaymentTokenId: string | null;
+  discountCouponId: string | null;
+  collectionMethod: 'charge_automatically' | 'send_invoice';
+  metadata: Record<string, string> | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface PortalSession {
   id: string;
+  arn: string;
+  accountId: string;
   customerId: string;
+  /** Open it in the customer's browser; it carries a short-lived token. */
   url: string;
   returnUrl: string;
   expiresAt: string;
+  createdAt: string;
 }
+
+/** A partner that bills merchants through Plugipay (the partner registry grows; the
+ *  names here are the ones known today). */
+export type PartnerId =
+  | 'storlaunch'
+  | 'fulkruma'
+  | 'ripllo'
+  | 'catentio'
+  | 'huudis'
+  | 'linksnap'
+  | 'pawpado'
+  | 'serront'
+  | 'malapos'
+  | (string & {});
 
 export interface PartnerWorkspace {
   accountId: string;
-  partner: 'storlaunch' | 'fulkruma' | 'ripllo';
+  partner: PartnerId;
   discountRate: number;
   brandName: string | null;
   businessEmail: string | null;
@@ -346,12 +422,20 @@ export interface WebhookDelivery {
   attemptLog: WebhookDeliveryAttempt[];
 }
 
+/** An event as `events.list` / `events.get` return it. */
 export interface EventRecord {
   id: string;
   type: string;
-  accountId: string;
+  accountId: string | null;
+  /** The mode it happened in; null for events from before events carried one. */
+  mode: Mode | null;
   occurredAt: string;
   data: unknown;
+  /** Delivery bookkeeping: `idempotencyKey`, `mode`, `requestId`, `source`, `replayOf`. */
+  metadata: unknown;
+  createdAt: string;
+  /** When the outbox worker sent it to your endpoints; null while queued. */
+  publishedAt: string | null;
 }
 
 export interface ReceiptSummary {
@@ -370,7 +454,7 @@ export interface ReceiptSummary {
 }
 
 export interface PartnerUsageSummary {
-  partner: 'storlaunch' | 'fulkruma' | 'ripllo';
+  partner: PartnerId;
   from: string;
   to: string;
   currency: 'IDR';
@@ -389,18 +473,25 @@ export interface PartnerUsageSummary {
 // uploads, workspaces, account, admin-portal, billing, onboarding,
 // checkout-settings.
 
-export type RefundStatus = 'pending' | 'succeeded' | 'failed' | 'canceled';
+export type RefundStatus = 'pending' | 'succeeded' | 'failed';
+export type RefundReason = 'requested_by_customer' | 'duplicate' | 'fraudulent' | 'other';
 
 export interface Refund {
   id: string;
+  arn: string;
   accountId: string;
+  /** The provider charge refunded (a checkout session's `paymentId`). */
+  chargeId: string;
+  /** The invoice it refunds, when the charge paid one. */
+  invoiceId: string | null;
   amount: number;
   currency: CurrencyCode;
+  reason: RefundReason;
   status: RefundStatus;
-  reason: string | null;
-  sourceType: 'checkout_session' | 'invoice';
-  sourceId: string;
-  failureReason: string | null;
+  /** Why the provider refused it (`failed` only). */
+  failureCode: string | null;
+  failureMessage: string | null;
+  metadata: Record<string, string> | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -588,45 +679,97 @@ export interface UploadedFile {
   fileSize: number;
 }
 
+export type WorkspaceRole = 'owner' | 'admin' | 'member';
+
+/** A workspace (a Huudis account). A key's `workspaces.list` is its own workspace, with
+ *  `id`, `name`, `slug` and `role` only; a person's comes from Huudis with the rest. */
 export interface Workspace {
   id: string;
-  accountId: string;
-  brandName: string | null;
-  businessEmail: string | null;
-  createdAt: string;
-  updatedAt: string;
+  name: string;
+  slug: string;
+  role?: WorkspaceRole;
+  createdAt?: string;
+  joinedAt?: string;
+  /** The workspace the person is signed in to. */
+  isActive?: boolean;
+  isForjioInternal?: boolean;
+  /** Set while a deletion is scheduled. */
+  pendingDeletionAt?: string | null;
 }
 
+/** `workspaces.update` answers with the renamed workspace's id, name and slug. */
+export type WorkspaceRename = Pick<Workspace, 'id' | 'name' | 'slug'>;
+
+/** `workspaces.delete` schedules the deletion: it happens at `pendingDeletionAt`. */
+export interface WorkspaceDeletion {
+  scheduled: boolean;
+  pendingDeletionAt: string;
+}
+
+/** The signed-in person's Huudis profile. When Huudis can't be reached the API answers
+ *  from the session with `id`, `email`, `name` and `emailVerified` only. */
 export interface AccountProfile {
   id: string;
   email: string;
-  emailVerified: boolean;
   name: string | null;
-  mfaEnrolled: boolean;
-  createdAt: string;
+  emailVerified: boolean;
+  locale?: string | null;
+  /** False for a person who only signs in with Google / Apple. */
+  hasPassword?: boolean;
+  mfaEnabled?: boolean;
+  pendingDeletionAt?: string | null;
+  createdAt?: string;
+  lastLoginAt?: string | null;
+  memberships?: { role: WorkspaceRole; account: { id: string; name: string; slug: string }; joinedAt: string }[];
 }
 
+/** `account.update` answers with the fields it changes. */
+export interface AccountProfileUpdate {
+  id: string;
+  name: string | null;
+  locale: string | null;
+}
+
+/** One of the person's signed-in sessions. */
 export interface BrowserSession {
   id: string;
   userAgent: string | null;
-  ipAddress: string | null;
-  current: boolean;
+  ip: string | null;
   createdAt: string;
-  lastSeenAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string;
+  /** The session making this request. */
+  current: boolean;
 }
 
+/** A Google or Apple sign-in linked to the person. */
 export interface LinkedAccount {
-  provider: string;
-  subject: string;
+  id: string;
+  provider: 'google' | 'apple';
   email: string | null;
   linkedAt: string;
 }
 
+/** `account.listLinked`: the linked sign-ins, and whether the person also has a password
+ *  (unlinking the last sign-in of a person without one is refused). */
+export interface LinkedAccounts {
+  hasPassword: boolean;
+  providers: LinkedAccount[];
+}
+
+/** A member of the active workspace (its Huudis IAM users). */
 export interface WorkspaceMember {
   id: string;
   email: string;
-  role: string;
+  name: string | null;
+  emailVerified: boolean;
+  role: WorkspaceRole;
   joinedAt: string;
+  lastLoginAt: string | null;
+  createdAt: string;
+  /** The person making this request. */
+  isYou: boolean;
+  groups: { id: string; name: string }[];
 }
 
 /** One of Plugipay's own plans (`billing.listTiers`). A limit of `null` is unlimited. */
@@ -720,17 +863,81 @@ export interface AdminPortalIdentity {
   isForjioInternal: boolean;
 }
 
-// Webhook events — the subset Plugipay emits. Each carries a typed
-// `data.object` matching the resource snapshot at event time.
+// ─── Webhook events ────────────────────────────────────────────
+// Every type Plugipay emits (GET /api/v1/events/types). The body is
+// `{ id, type, accountId, occurredAt, data }`; `data.object` is the
+// resource after the change, in the shape its own GET returns, and
+// `data` also names it (`aggregateType`, `aggregateId`).
+
+/** What every event's `data` carries besides its object. */
+export interface WebhookEventAggregate {
+  aggregateType: string;
+  aggregateId: string;
+}
+
+interface WebhookEnvelope<T extends string, D> {
+  id: string;
+  type: T;
+  accountId: string;
+  occurredAt: string;
+  data: D & WebhookEventAggregate;
+}
+
+/** `plugipay.webhook_endpoint.disabled.v1`'s object: the endpoint Plugipay switched off. */
+export interface DisabledWebhookEndpoint {
+  id: string;
+  url: string;
+  mode: Mode;
+  active: false;
+  disabledAt: string;
+  disabledReason: string;
+  consecutiveFailures: number;
+  failingSince: string;
+}
+
 export type WebhookEvent =
-  | { type: 'plugipay.checkout_session.completed.v1'; id: string; accountId: string; occurredAt: string; data: { object: CheckoutSession } }
-  | { type: 'plugipay.checkout_session.expired.v1';   id: string; accountId: string; occurredAt: string; data: { object: CheckoutSession } }
-  | { type: 'plugipay.invoice.created.v1';            id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
-  | { type: 'plugipay.invoice.finalized.v1';          id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
-  | { type: 'plugipay.invoice.paid.v1';               id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
-  | { type: 'plugipay.invoice.payment_failed.v1';     id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
-  | { type: 'plugipay.invoice.voided.v1';             id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
-  | { type: 'plugipay.invoice.sent.v1';               id: string; accountId: string; occurredAt: string; data: { object: Invoice; to: string } }
-  | { type: 'plugipay.subscription.created.v1';       id: string; accountId: string; occurredAt: string; data: { object: Subscription } }
-  | { type: 'plugipay.subscription.canceled.v1';      id: string; accountId: string; occurredAt: string; data: { object: Subscription } }
-  | { type: 'plugipay.subscription.paused.v1';        id: string; accountId: string; occurredAt: string; data: { object: Subscription } };
+  | WebhookEnvelope<'plugipay.checkout_session.completed.v1', { object: CheckoutSession }>
+  | WebhookEnvelope<'plugipay.checkout_session.expired.v1', { object: CheckoutSession }>
+  | WebhookEnvelope<'plugipay.invoice.created.v1', { object: Invoice }>
+  | WebhookEnvelope<'plugipay.invoice.finalized.v1', { object: Invoice }>
+  /** `to`: the address the invoice was emailed to. */
+  | WebhookEnvelope<'plugipay.invoice.sent.v1', { object: Invoice; to: string }>
+  | WebhookEnvelope<'plugipay.invoice.paid.v1', { object: Invoice }>
+  | WebhookEnvelope<'plugipay.invoice.voided.v1', { object: Invoice }>
+  /** A Midtrans payment for the invoice is pending. */
+  | WebhookEnvelope<'plugipay.invoice.pending.v1', { object: Invoice }>
+  /** A Midtrans payment for the invoice failed; `reason` is Midtrans' transaction status. */
+  | WebhookEnvelope<'plugipay.invoice.failed.v1', { object: Invoice; reason?: string | null }>
+  | WebhookEnvelope<'plugipay.refund.issued.v1', { object: Refund }>
+  | WebhookEnvelope<'plugipay.refund.failed.v1', { object: Refund }>
+  | WebhookEnvelope<'plugipay.customer.created.v1', { object: Customer }>
+  | WebhookEnvelope<'plugipay.customer.updated.v1', { object: Customer }>
+  /** The customer as it was before it was deleted. */
+  | WebhookEnvelope<'plugipay.customer.deleted.v1', { object: Customer }>
+  | WebhookEnvelope<'plugipay.plan.created.v1', { object: Plan }>
+  | WebhookEnvelope<'plugipay.plan.updated.v1', { object: Plan }>
+  | WebhookEnvelope<'plugipay.plan.archived.v1', { object: Plan }>
+  | WebhookEnvelope<'plugipay.subscription.created.v1', { object: Subscription }>
+  | WebhookEnvelope<'plugipay.subscription.updated.v1', { object: Subscription }>
+  | WebhookEnvelope<'plugipay.subscription.paused.v1', { object: Subscription }>
+  | WebhookEnvelope<'plugipay.subscription.resumed.v1', { object: Subscription }>
+  | WebhookEnvelope<'plugipay.subscription.canceled.v1', { object: Subscription }>
+  /** From the renewal job `object` carries only `id`, `currentPeriodStart` and
+   *  `currentPeriodEnd`; from a test clock, the whole subscription plus `daysAdvanced`. */
+  | WebhookEnvelope<'plugipay.subscription.renewed.v1', {
+      object: Pick<Subscription, 'id' | 'currentPeriodStart' | 'currentPeriodEnd'> & Partial<Subscription>;
+      daysAdvanced?: number;
+    }>
+  | WebhookEnvelope<'plugipay.payout.created.v1', { object: Payout }>
+  | WebhookEnvelope<'plugipay.payout.in_transit.v1', { object: Payout }>
+  | WebhookEnvelope<'plugipay.payout.paid.v1', { object: Payout }>
+  | WebhookEnvelope<'plugipay.payout.failed.v1', { object: Payout }>
+  | WebhookEnvelope<'plugipay.payout.cancelled.v1', { object: Payout }>
+  | WebhookEnvelope<'plugipay.gift_card.issued.v1', { object: GiftCard }>
+  | WebhookEnvelope<'plugipay.gift_card.redeemed.v1', { object: GiftCard; entry: GiftCardEntry }>
+  | WebhookEnvelope<'plugipay.gift_card.topped_up.v1', { object: GiftCard; entry: GiftCardEntry }>
+  | WebhookEnvelope<'plugipay.gift_card.voided.v1', { object: GiftCard }>
+  | WebhookEnvelope<'plugipay.webhook_endpoint.disabled.v1', { object: DisabledWebhookEndpoint }>;
+
+/** Every event type Plugipay emits. */
+export type WebhookEventType = WebhookEvent['type'];
