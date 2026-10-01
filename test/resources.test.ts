@@ -237,3 +237,83 @@ describe('204 no-body responses', () => {
 
 // vitest globals
 import { afterEach } from 'vitest';
+
+describe('0.10.0: hand-written methods the API refused before', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  /** Answer each request with the next of `replies` (status, content-type, body). */
+  function serve(...replies: Array<{ body: string; type?: string; status?: number }>) {
+    const sent: Array<{ method: string; url: string; headers: Record<string, string>; body: unknown }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({
+        method: init?.method ?? 'GET',
+        url: String(input),
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      const r = replies[Math.min(sent.length - 1, replies.length - 1)]!;
+      return new Response(r.body, { status: r.status ?? 200, headers: { 'content-type': r.type ?? 'application/json' } });
+    }) as typeof fetch;
+    return { sent, client: new PlugipayClient({ keyId: 'ak_test', secret: 'sk_test', baseUrl: 'https://plugipay.test' }) };
+  }
+  const env = (data: unknown) => ({ body: JSON.stringify({ data, error: null, meta: { requestId: 'r' } }) });
+
+  it('customers.update sends an Idempotency-Key', async () => {
+    const { sent, client } = serve(env({ id: 'cus_1' }));
+    await client.customers.update('cus_1', { name: 'Ada', metadata: { a: 'b' } });
+    expect(sent[0]).toMatchObject({ method: 'PATCH', body: { name: 'Ada', metadata: { a: 'b' } } });
+    expect(sent[0]!.headers['Idempotency-Key']).toMatch(/^idem_/);
+  });
+
+  it('plans.create turns currency + amount into one flat price, with default portal features', async () => {
+    const { sent, client } = serve(env({ id: 'pln_1' }));
+    await client.plans.create({ name: 'Pro', interval: 'month', currency: 'IDR', amount: 150000 });
+    expect(sent[0]!.body).toEqual({
+      name: 'Pro',
+      interval: 'month',
+      portalFeatures: { selfServeCancel: true, selfServePause: false, selfServeUpgrade: false, selfServeDowngrade: false, updatePaymentMethod: true },
+      prices: [{ currency: 'IDR', model: 'flat', unitAmount: 150000 }],
+    });
+  });
+
+  it('templates.create / update send config', async () => {
+    const { sent, client } = serve(env({ id: 'tpl_1' }));
+    await client.templates.create({ kind: 'invoice', name: 'Net 14', config: { termsText: 'Net 14' } });
+    await client.templates.update('tpl_1', { config: { termsText: 'Net 30' } });
+    expect(sent.map((s) => s.body)).toEqual([
+      { kind: 'invoice', name: 'Net 14', config: { termsText: 'Net 14' } },
+      { config: { termsText: 'Net 30' } },
+    ]);
+  });
+
+  it('templates.preview returns the HTML page the route answers with', async () => {
+    const { client } = serve({ body: '<!doctype html><p>hi</p>', type: 'text/html; charset=utf-8' });
+    await expect(client.templates.preview({ kind: 'receipt', config: {} })).resolves.toEqual({ html: '<!doctype html><p>hi</p>' });
+  });
+
+  it('templates.duplicate with a name renames the copy', async () => {
+    const { sent, client } = serve(env({ id: 'tpl_2', name: 'A (copy)' }), env({ id: 'tpl_2', name: 'B' }));
+    await expect(client.templates.duplicate('tpl_1', 'B')).resolves.toMatchObject({ name: 'B' });
+    expect(sent.map((s) => `${s.method} ${new URL(s.url).pathname}`)).toEqual([
+      'POST /api/v1/templates/tpl_1/duplicate',
+      'PATCH /api/v1/templates/tpl_2',
+    ]);
+    expect(sent[1]!.body).toEqual({ name: 'B' });
+  });
+
+  it('adapters.list returns the adapters the API keys by kind', async () => {
+    const { client } = serve(env({ manual: { kind: 'manual', status: 'active' }, xendit: { kind: 'xendit', status: 'active' } }));
+    await expect(client.adapters.list()).resolves.toEqual([
+      { kind: 'manual', status: 'active' },
+      { kind: 'xendit', status: 'active' },
+    ]);
+  });
+
+  it('adapters.update* send an Idempotency-Key', async () => {
+    const { sent, client } = serve(env({ kind: 'xendit' }));
+    await client.adapters.updateXendit({ secretKey: 'xnd_sk_test_1' });
+    await client.adapters.updateManual({ instructions: 'Transfer' });
+    expect(sent.every((s) => /^idem_/.test(s.headers['Idempotency-Key'] ?? ''))).toBe(true);
+  });
+});

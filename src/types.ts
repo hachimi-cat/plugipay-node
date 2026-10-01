@@ -35,28 +35,87 @@ export interface Customer {
   updatedAt: string;
 }
 
+export type PlanInterval = 'day' | 'week' | 'month' | 'year';
+export type PriceModel = 'flat' | 'tiered' | 'volume' | 'usage';
+
+/** What a customer may do for themselves in the billing portal, per plan. */
+export interface PortalFeatures {
+  selfServeCancel: boolean;
+  selfServePause: boolean;
+  selfServeUpgrade: boolean;
+  selfServeDowngrade: boolean;
+  updatePaymentMethod: boolean;
+}
+
 export interface Plan {
   id: string;
+  arn: string;
   accountId: string;
   name: string;
-  currency: CurrencyCode;
-  interval: 'day' | 'week' | 'month' | 'year';
-  amount: number;
+  description: string | null;
+  interval: PlanInterval;
+  intervalCount: number;
+  trialDays: number;
+  /** A plan's amounts live on its prices (one per currency). */
+  prices: Price[];
+  usageAggregate: 'sum' | 'max' | 'last' | null;
+  meteredUnit: string | null;
+  portalFeatures: PortalFeatures;
+  dunningPolicyId: string | null;
   active: boolean;
+  archivedAt: string | null;
+  metadata: Record<string, string> | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PriceTier {
+  upTo: number | 'inf';
+  unitAmount: number;
+  flatAmount: number;
 }
 
 export interface Price {
   id: string;
   planId: string;
   currency: CurrencyCode;
-  model: 'flat' | 'usage';
+  model: PriceModel;
   unitAmount: number | null;
-  tiers: unknown;
+  tiers: PriceTier[] | null;
   taxMode: 'inclusive' | 'exclusive';
   active: boolean;
   createdAt: string;
+}
+
+/** A price as `plans.create` / `plans.addPrice` take it. `unitAmount` (minor units) for
+ *  `flat` and `usage`; `tiers` for `tiered` and `volume`. */
+export interface PriceInput {
+  currency: CurrencyCode;
+  model: PriceModel;
+  unitAmount?: number;
+  tiers?: PriceTier[];
+  taxMode?: 'inclusive' | 'exclusive';
+  active?: boolean;
+}
+
+/** `plans.create`. Give the plan its prices, or — for one flat price — just `currency`
+ *  and `amount` (minor units), which become `prices: [{ currency, model: 'flat',
+ *  unitAmount: amount }]`. `portalFeatures` defaults to cancel + update payment method. */
+export interface PlanCreateInput {
+  name: string;
+  interval: PlanInterval;
+  prices?: PriceInput[];
+  currency?: CurrencyCode;
+  amount?: number;
+  description?: string;
+  intervalCount?: number;
+  trialDays?: number;
+  portalFeatures?: PortalFeatures;
+  dunningPolicyId?: string | null;
+  usageAggregate?: 'sum' | 'max' | 'last' | null;
+  meteredUnit?: string | null;
+  active?: boolean;
+  metadata?: Record<string, string> | null;
 }
 
 export interface CheckoutSession {
@@ -351,17 +410,50 @@ export interface GiftCardMutation {
 
 export type AdapterKind = 'xendit' | 'paypal' | 'midtrans' | 'manual';
 
+/** A connected provider (`adapters.list`, `adapters.update*`), per mode. Secrets are never
+ *  returned: `secretKeyLast4` and the masked `publicConfig` stand for them. */
 export interface AdapterConfig {
-  kind: AdapterKind;
-  configured: boolean;
-  publicConfig?: Record<string, unknown>;
-  updatedAt?: string;
+  kind: AdapterKind | 'managed';
+  status: 'unconfigured' | 'active' | 'error';
+  secretKeyLast4: string | null;
+  publicConfig: Record<string, unknown> | null;
+  configuredAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorCode: string | null;
 }
 
+export interface XenditAdapterInput {
+  secretKey: string;
+  callbackToken?: string;
+}
+export interface PaypalAdapterInput {
+  clientId: string;
+  secret: string;
+  mode?: 'live' | 'sandbox';
+}
+export interface MidtransAdapterInput {
+  serverKey: string;
+  clientKey: string;
+  merchantId: string;
+  env?: 'sandbox' | 'production';
+}
+export interface ManualAdapterInput {
+  bankAccounts?: { bankName: string; accountNumber: string; accountHolder: string }[];
+  staticQrImageUrl?: string | null;
+  instructions?: string | null;
+}
+
+/** The managed (xenPlatform) sub-account behind managed payments. */
 export interface ManagedOnboardingState {
-  state: 'not_started' | 'pending' | 'verified' | 'failed';
-  provider: string;
-  details?: Record<string, unknown>;
+  subAccountId: string;
+  email: string | null;
+  onboardingUrl: string | null;
+  kybStatus: string;
+  capabilitiesStatus: string;
+  payoutsReady: boolean;
+  lastWebhookAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ApiKey {
@@ -378,16 +470,58 @@ export interface ApiKey {
 
 export type TemplateKind = 'checkout' | 'receipt' | 'invoice';
 
+export interface ReceiptTemplateConfig {
+  thankYouText?: string;
+  footerText?: string | null;
+  showTax?: boolean;
+  taxLabel?: string;
+  /** 0–1, e.g. 0.11 for 11%. */
+  taxRate?: number;
+  cashierLabel?: string | null;
+  showBusinessDetails?: boolean;
+  /** `#RRGGBB`. */
+  accentColor?: string | null;
+}
+export interface InvoiceTemplateConfig {
+  termsText?: string | null;
+  footerText?: string | null;
+  showTax?: boolean;
+  taxLabel?: string;
+  taxRate?: number;
+  showBusinessDetails?: boolean;
+  accentColor?: string | null;
+}
+export interface CheckoutTemplateConfig {
+  accentColor?: string | null;
+  successMessage?: string | null;
+  footerTagline?: string | null;
+  showBusinessDetails?: boolean;
+}
+export type TemplateConfig = ReceiptTemplateConfig | InvoiceTemplateConfig | CheckoutTemplateConfig;
+
 export interface Template {
   id: string;
   accountId: string;
   kind: TemplateKind;
   name: string;
   isDefault: boolean;
-  document: Record<string, unknown>;
+  /** The template's settings — the fields of the kind's config. */
+  config: TemplateConfig;
   createdAt: string;
   updatedAt: string;
 }
+
+/** `templates.create`: a name and the kind's config. */
+export type TemplateCreateInput =
+  | { kind: 'receipt'; name: string; isDefault?: boolean; config: ReceiptTemplateConfig }
+  | { kind: 'invoice'; name: string; isDefault?: boolean; config: InvoiceTemplateConfig }
+  | { kind: 'checkout'; name: string; isDefault?: boolean; config: CheckoutTemplateConfig };
+
+/** `templates.preview`: renders HTML from a kind and a config, without saving. */
+export type TemplatePreviewInput =
+  | { kind: 'receipt'; config: ReceiptTemplateConfig }
+  | { kind: 'invoice'; config: InvoiceTemplateConfig }
+  | { kind: 'checkout'; config: CheckoutTemplateConfig };
 
 /** An uploaded image (POST /api/v1/uploads/image). */
 export interface UploadedFile {
@@ -447,14 +581,62 @@ export interface BillingTier {
   features: string[];
 }
 
+/** One of Plugipay's own plans (`billing.listPlans`): `price` is IDR per month, `-1` when
+ *  the plan has no fixed price. */
+export interface BillingPlan {
+  id: string;
+  name: string;
+  price: number;
+}
+
+export interface CheckoutReceiptTemplate {
+  footerText: string | null;
+  thankYouText: string | null;
+  showTax: boolean | null;
+  taxLabel: string | null;
+  taxRate: number | null;
+  cashierLabel: string | null;
+  showMerchantAddress: boolean | null;
+  merchantAddress: string | null;
+  merchantTaxId: string | null;
+}
+
+/** The hosted checkout's settings: payment methods, branding and business details. */
 export interface CheckoutSettings {
-  accountId: string;
+  enabledMethods: string[];
+  methodOrder: string[];
+  /** methodId → adapter kind, where the merchant picked one. */
+  methodAdapter: Record<string, string>;
+  brandName: string | null;
   brandLogoUrl: string | null;
-  brandColor: string | null;
-  defaultTemplateId: string | null;
-  termsUrl: string | null;
-  privacyUrl: string | null;
-  updatedAt: string;
+  brandAccentColor: string | null;
+  brandTagline: string | null;
+  businessPhone: string | null;
+  businessEmail: string | null;
+  businessAddress: string | null;
+  businessTaxId: string | null;
+  receiptTemplate: CheckoutReceiptTemplate | null;
+  /** Computed: the methods the connected adapters can take. */
+  availableMethods: string[];
+  /** Computed: methodId → the adapter kinds that can process it. */
+  methodSupport: Record<string, string[]>;
+}
+
+/** `checkoutSettings.update`: only the fields given change. */
+export interface CheckoutSettingsUpdate {
+  enabledMethods?: string[];
+  methodOrder?: string[];
+  methodAdapter?: Record<string, string>;
+  brandName?: string | null;
+  brandLogoUrl?: string | null;
+  /** `#RRGGBB`. */
+  brandAccentColor?: string | null;
+  brandTagline?: string | null;
+  businessPhone?: string | null;
+  businessEmail?: string | null;
+  businessAddress?: string | null;
+  businessTaxId?: string | null;
+  receiptTemplate?: Partial<CheckoutReceiptTemplate> | null;
 }
 
 export interface AdminPortalIdentity {
@@ -474,6 +656,7 @@ export type WebhookEvent =
   | { type: 'plugipay.invoice.paid.v1';               id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
   | { type: 'plugipay.invoice.payment_failed.v1';     id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
   | { type: 'plugipay.invoice.voided.v1';             id: string; accountId: string; occurredAt: string; data: { object: Invoice } }
+  | { type: 'plugipay.invoice.sent.v1';               id: string; accountId: string; occurredAt: string; data: { object: Invoice; to: string } }
   | { type: 'plugipay.subscription.created.v1';       id: string; accountId: string; occurredAt: string; data: { object: Subscription } }
   | { type: 'plugipay.subscription.canceled.v1';      id: string; accountId: string; occurredAt: string; data: { object: Subscription } }
   | { type: 'plugipay.subscription.paused.v1';        id: string; accountId: string; occurredAt: string; data: { object: Subscription } };

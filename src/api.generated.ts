@@ -7,7 +7,7 @@ export interface ApigenTransport {
   apigenRequest(method: string, path: string, query: Record<string, unknown> | undefined, body: unknown): Promise<unknown>;
 }
 
-/** All 139 feature routes of the Plugipay API. */
+/** All 140 feature routes of the Plugipay API. */
 export class GeneratedApi {
   constructor(private readonly client: ApigenTransport) {}
 
@@ -366,6 +366,11 @@ export class GeneratedApi {
     const all: Record<string, unknown> = { ...(input ?? {}) };
     const query: Record<string, unknown> = {};
     return this.call("POST", `/api/v1/events/trigger`, query, all);
+  }
+
+  /** List event types (GET /api/v1/events/types) */
+  eventsTypes(): Promise<unknown> {
+    return this.call("GET", `/api/v1/events/types`, {}, undefined);
   }
 
   /** Issue a gift card / store credit (store credit when customerId set) (POST /api/v1/gift-cards) */

@@ -34,9 +34,21 @@ import {
   AdapterConfig,
   AdapterKind,
   ManagedOnboardingState,
+  XenditAdapterInput,
+  PaypalAdapterInput,
+  MidtransAdapterInput,
+  ManualAdapterInput,
   ApiKey,
   Template,
   TemplateKind,
+  TemplateCreateInput,
+  TemplatePreviewInput,
+  TemplateConfig,
+  PlanCreateInput,
+  PriceInput,
+  PortalFeatures,
+  CheckoutSettingsUpdate,
+  BillingPlan,
   UploadedFile,
   Workspace,
   AccountProfile,
@@ -185,6 +197,9 @@ export class PlugipayClient {
     // DELETE-style endpoints answer 204 with no body — there is no
     // envelope to parse and nothing to return.
     if (res.status === 204 || (res.ok && text === '')) return undefined as T;
+    // A route that renders a page (POST /templates/preview) answers 2xx with the HTML
+    // itself, not an envelope: that text is the result.
+    if (res.ok && /^text\/html\b/i.test(res.headers?.get?.('content-type') ?? '')) return text as T;
     let env: ApiEnvelope<T>;
     try { env = JSON.parse(text) as ApiEnvelope<T>; }
     catch { throw new PlugipayError(res.status, 'invalid_response', `Non-JSON response: ${text.slice(0, 200)}`); }
@@ -278,13 +293,36 @@ export class PlugipayClient {
         method: 'GET',
         path: `/api/v1/customers${qs(params)}`,
       }),
-    update: (id: string, patch: { email?: string; name?: string; phone?: string }) =>
-      this.request<Customer>({ method: 'PATCH', path: `/api/v1/customers/${id}`, body: patch }),
+    /** Change a customer; only the fields given change (`metadata: null` clears it). */
+    update: (
+      id: string,
+      patch: {
+        email?: string;
+        name?: string;
+        phone?: string;
+        externalId?: string;
+        taxId?: string;
+        defaultPaymentTokenId?: string;
+        metadata?: Record<string, string> | null;
+      },
+    ) =>
+      this.request<Customer>({ method: 'PATCH', path: `/api/v1/customers/${id}`, body: patch, idempotencyKey: this.genIdem() }),
   };
 
   plans = {
-    create: (input: { name: string; currency: CurrencyCode; amount: number; interval: 'day' | 'week' | 'month' | 'year' }) =>
-      this.request<Plan>({ method: 'POST', path: '/api/v1/plans', body: input, idempotencyKey: this.genIdem() }),
+    /** Create a plan with its prices. For a single flat price, `currency` + `amount`
+     *  (minor units) stand for `prices: [{ currency, model: 'flat', unitAmount: amount }]`. */
+    create: (input: PlanCreateInput) => {
+      const { currency, amount, prices, portalFeatures, ...rest } = input;
+      const body = {
+        ...rest,
+        portalFeatures: portalFeatures ?? DEFAULT_PORTAL_FEATURES,
+        prices: prices ?? (currency !== undefined && amount !== undefined
+          ? [{ currency, model: 'flat' as const, unitAmount: amount }]
+          : []),
+      };
+      return this.request<Plan>({ method: 'POST', path: '/api/v1/plans', body, idempotencyKey: this.genIdem() });
+    },
     get: (id: string) => this.request<Plan>({ method: 'GET', path: `/api/v1/plans/${id}` }),
     list: (params: { limit?: number; active?: boolean; cursor?: string; order?: 'asc' | 'desc' } = {}) =>
       this.requestList<Plan>({
@@ -298,20 +336,12 @@ export class PlugipayClient {
     /** Add a new Price (currency variant) to an existing Plan. Used to
      *  attach a USD Price to an IDR-priced Plan so international
      *  customers can subscribe + auto-renew in USD via PayPal. */
-    addPrice: (
-      planId: string,
-      input: {
-        currency: CurrencyCode;
-        model?: 'flat' | 'usage';
-        unitAmount?: number;
-        tiers?: unknown;
-        taxMode?: 'inclusive' | 'exclusive';
-      },
-    ) =>
+    addPrice: (planId: string, input: Omit<PriceInput, 'model'> & { model?: PriceInput['model'] }) =>
       this.request<Price>({
         method: 'POST',
         path: `/api/v1/plans/${planId}/prices`,
-        body: input,
+        // `model` defaults to flat (the API requires one)
+        body: { ...input, model: input.model ?? 'flat' },
         idempotencyKey: this.genIdem(),
       }),
   };
@@ -356,14 +386,14 @@ export class PlugipayClient {
       status?: 'draft' | 'open';
       memo?: string;
     }) =>
-      this.request<Invoice>({ method: 'POST', path: '/api/v1/invoices', body: input }),
+      this.request<Invoice>({ method: 'POST', path: '/api/v1/invoices', body: input, idempotencyKey: this.genIdem() }),
     get: (id: string) => this.request<Invoice>({ method: 'GET', path: `/api/v1/invoices/${id}` }),
     list: (params: { limit?: number; cursor?: string; status?: string; customerId?: string } = {}) =>
       this.requestList<Invoice>({
         method: 'GET',
         path: `/api/v1/invoices${qs(params)}`,
       }),
-    finalize: (id: string) => this.request<Invoice>({ method: 'POST', path: `/api/v1/invoices/${id}/finalize`, body: {} }),
+    finalize: (id: string) => this.request<Invoice>({ method: 'POST', path: `/api/v1/invoices/${id}/finalize`, body: {}, idempotencyKey: this.genIdem() }),
     pay: (id: string) => this.request<Invoice>({ method: 'POST', path: `/api/v1/invoices/${id}/pay`, body: {}, idempotencyKey: this.genIdem() }),
     void: (id: string) => this.request<Invoice>({ method: 'POST', path: `/api/v1/invoices/${id}/void`, body: {}, idempotencyKey: this.genIdem() }),
     sendEmail: (id: string, to?: string) =>
@@ -572,25 +602,39 @@ export class PlugipayClient {
 
   // ─── Adapters (payment provider config) ────────────────────
   adapters = {
-    list: () => this.request<AdapterConfig[]>({ method: 'GET', path: '/api/v1/adapters' }),
-    updateXendit: (config: Record<string, unknown>) =>
-      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/xendit', body: config }),
-    updatePaypal: (config: Record<string, unknown>) =>
-      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/paypal', body: config }),
-    updateMidtrans: (config: Record<string, unknown>) =>
-      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/midtrans', body: config }),
-    updateManual: (config: Record<string, unknown>) =>
-      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/manual', body: config }),
+    /** The connected providers in the key's mode, one entry per kind (the API answers
+     *  an object keyed by kind; this returns its values). */
+    list: async () => {
+      const byKind = await this.request<Record<string, AdapterConfig> | null>({ method: 'GET', path: '/api/v1/adapters' });
+      return Object.values(byKind ?? {});
+    },
+    updateXendit: (config: XenditAdapterInput) =>
+      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/xendit', body: config, idempotencyKey: this.genIdem() }),
+    updatePaypal: (config: PaypalAdapterInput) =>
+      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/paypal', body: config, idempotencyKey: this.genIdem() }),
+    updateMidtrans: (config: MidtransAdapterInput) =>
+      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/midtrans', body: config, idempotencyKey: this.genIdem() }),
+    updateManual: (config: ManualAdapterInput) =>
+      this.request<AdapterConfig>({ method: 'PUT', path: '/api/v1/adapters/manual', body: config, idempotencyKey: this.genIdem() }),
+    /** The managed sub-account, or null before onboarding started. */
     managedOnboardingState: () =>
-      this.request<ManagedOnboardingState>({ method: 'GET', path: '/api/v1/adapters/managed/onboarding' }),
-    startManagedOnboarding: (input: { kind: AdapterKind; details?: Record<string, unknown> } = { kind: 'xendit' }) =>
+      this.request<ManagedOnboardingState | null>({ method: 'GET', path: '/api/v1/adapters/managed/onboarding' }),
+    /** Start managed payments: provisions the sub-account for the payout `email`. */
+    startManagedOnboarding: (input: { email: string }) =>
       this.request<ManagedOnboardingState>({
         method: 'POST',
         path: '/api/v1/adapters/managed/onboarding',
         body: input,
         idempotencyKey: this.genIdem(),
       }),
-    simulateManagedOnboarding: (input: { result: 'verified' | 'failed' } = { result: 'verified' }) =>
+    /** Staging only (404 on plugipay.com): set the sub-account's verification state. */
+    simulateManagedOnboarding: (
+      input: {
+        kybStatus?: 'not_started' | 'invited' | 'registered' | 'live' | 'rejected';
+        capabilitiesStatus?: 'pending' | 'live' | 'declined' | 'resubmission_required';
+        payoutsReady?: boolean;
+      } = { kybStatus: 'live', capabilitiesStatus: 'live', payoutsReady: true },
+    ) =>
       this.request<ManagedOnboardingState>({
         method: 'POST',
         path: '/api/v1/adapters/managed/onboarding/_simulate',
@@ -603,7 +647,7 @@ export class PlugipayClient {
    *  answers a key here with 403 person_only (a key must not mint or revoke keys). */
   apiKeys = {
     list: () => this.request<ApiKey[]>({ method: 'GET', path: '/api/v1/api-keys' }),
-    create: (input: { description?: string; scope?: string }) =>
+    create: (input: { name: string; environment?: 'test' | 'live'; scopes?: string[] }) =>
       this.request<ApiKey>({ method: 'POST', path: '/api/v1/api-keys', body: input, idempotencyKey: this.genIdem() }),
     revoke: (id: string) =>
       this.request<void>({ method: 'DELETE', path: `/api/v1/api-keys/${id}` }),
@@ -612,17 +656,19 @@ export class PlugipayClient {
   // ─── Billing (merchant subscription to Plugipay itself) ────
   billing = {
     listTiers: () => this.request<BillingTier[]>({ method: 'GET', path: '/api/v1/billing/tiers' }),
-    listPlans: () => this.request<Plan[]>({ method: 'GET', path: '/api/v1/billing/plans' }),
+    listPlans: () => this.request<BillingPlan[]>({ method: 'GET', path: '/api/v1/billing/plans' }),
     refreshTiers: () => this.request<{ refreshed: boolean }>({ method: 'POST', path: '/api/v1/billing/tiers/refresh', body: {} }),
   };
 
   // ─── Onboarding ─────────────────────────────────────────────
   onboarding = {
-    provisionManaged: (input: { businessEmail: string; brandName?: string }) =>
-      this.request<Workspace>({
+    /** Provision the managed (xenPlatform) sub-account for the key's workspace; returns
+     *  its id. Takes no input (the API reads none). */
+    provisionManaged: () =>
+      this.request<{ subAccountId: string }>({
         method: 'POST',
         path: '/api/v1/onboarding/provision-managed',
-        body: input,
+        body: {},
         idempotencyKey: this.genIdem(),
       }),
   };
@@ -630,7 +676,7 @@ export class PlugipayClient {
   // ─── Checkout settings ──────────────────────────────────────
   checkoutSettings = {
     get: () => this.request<CheckoutSettings>({ method: 'GET', path: '/api/v1/checkout/settings' }),
-    update: (patch: Partial<CheckoutSettings>) =>
+    update: (patch: CheckoutSettingsUpdate) =>
       this.request<CheckoutSettings>({ method: 'PATCH', path: '/api/v1/checkout/settings', body: patch }),
   };
 
@@ -639,21 +685,36 @@ export class PlugipayClient {
     list: (params: { kind?: TemplateKind } = {}) =>
       this.request<Template[]>({ method: 'GET', path: `/api/v1/templates${qs(params)}` }),
     get: (id: string) => this.request<Template>({ method: 'GET', path: `/api/v1/templates/${id}` }),
-    create: (input: { kind: TemplateKind; name: string; document: Record<string, unknown> }) =>
+    create: (input: TemplateCreateInput) =>
       this.request<Template>({ method: 'POST', path: '/api/v1/templates', body: input, idempotencyKey: this.genIdem() }),
-    update: (id: string, patch: Partial<{ name: string; document: Record<string, unknown> }>) =>
-      this.request<Template>({ method: 'PATCH', path: `/api/v1/templates/${id}`, body: patch }),
+    /** Rename a template or replace its config (the whole config: fields left out reset
+     *  to their defaults). */
+    update: (id: string, patch: { name?: string; config?: TemplateConfig }) =>
+      this.request<Template>({ method: 'PATCH', path: `/api/v1/templates/${id}`, body: patch, idempotencyKey: this.genIdem() }),
     makeDefault: (id: string) =>
-      this.request<Template>({ method: 'POST', path: `/api/v1/templates/${id}/make-default`, body: {} }),
-    duplicate: (id: string, name?: string) =>
-      this.request<Template>({
+      this.request<Template>({ method: 'POST', path: `/api/v1/templates/${id}/make-default`, body: {}, idempotencyKey: this.genIdem() }),
+    /** Copy a template. The API names the copy "<name> (copy)"; pass `name` to rename
+     *  it straight after (a second request). */
+    duplicate: async (id: string, name?: string) => {
+      const copy = await this.request<Template>({
         method: 'POST',
         path: `/api/v1/templates/${id}/duplicate`,
-        body: name ? { name } : {},
+        body: {},
         idempotencyKey: this.genIdem(),
-      }),
-    preview: (input: { kind: TemplateKind; document: Record<string, unknown>; sampleData?: Record<string, unknown> }) =>
-      this.request<{ html: string }>({ method: 'POST', path: '/api/v1/templates/preview', body: input }),
+      });
+      if (!name) return copy;
+      return this.request<Template>({
+        method: 'PATCH',
+        path: `/api/v1/templates/${copy.id}`,
+        body: { name },
+        idempotencyKey: this.genIdem(),
+      });
+    },
+    /** Render a kind + config as HTML with sample data, without saving anything. */
+    preview: async (input: TemplatePreviewInput) => {
+      const html = await this.request<string>({ method: 'POST', path: '/api/v1/templates/preview', body: input });
+      return { html: typeof html === 'string' ? html : '' };
+    },
     delete: (id: string) =>
       this.request<void>({ method: 'DELETE', path: `/api/v1/templates/${id}` }),
   };
@@ -750,6 +811,16 @@ export class PlugipayClient {
       }),
   };
 }
+
+/** What a plan lets its customers do in the billing portal when `plans.create` is given
+ *  no `portalFeatures`: the dashboard's defaults (cancel, update the payment method). */
+const DEFAULT_PORTAL_FEATURES: PortalFeatures = {
+  selfServeCancel: true,
+  selfServePause: false,
+  selfServeUpgrade: false,
+  selfServeDowngrade: false,
+  updatePaymentMethod: true,
+};
 
 function qs(params: Record<string, unknown>): string {
   const parts = Object.entries(params)
