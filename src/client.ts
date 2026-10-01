@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { GeneratedApi } from './api.generated.js';
 import {
   ApiEnvelope,
   Customer,
@@ -48,10 +49,13 @@ import {
 } from './types.js';
 
 export interface PlugipayClientOptions {
-  /** HMAC access key id (e.g. 'ak_live_...'). */
-  keyId: string;
+  /** HMAC access key id (e.g. 'ak_live_...'). With `secret`; or pass `apiKey`. */
+  keyId?: string;
   /** HMAC secret for the key. */
-  secret: string;
+  secret?: string;
+  /** A key minted in the dashboard (Settings → API keys), `pk_live_…` / `pk_test_…`:
+   *  sent as `Authorization: Bearer <key>` instead of signing with keyId + secret. */
+  apiKey?: string;
   /** Where to find Plugipay. Defaults to production. */
   baseUrl?: string;
   /** Optional merchant accountId to scope calls against. Forwarded as
@@ -81,16 +85,18 @@ export interface FetchArgs {
 export class PlugipayClient {
   private readonly keyId: string;
   private readonly secret: string;
+  private readonly apiKey: string | undefined;
   private readonly baseUrl: string;
   private readonly defaultOnBehalfOf: string | undefined;
   private readonly timeoutMs: number;
 
   constructor(opts: PlugipayClientOptions) {
-    if (!opts.keyId || !opts.secret) {
-      throw new Error('PlugipayClient: keyId and secret are required');
+    if (!opts.apiKey && (!opts.keyId || !opts.secret)) {
+      throw new Error('PlugipayClient: keyId and secret (or apiKey) are required');
     }
-    this.keyId = opts.keyId;
-    this.secret = opts.secret;
+    this.keyId = opts.keyId ?? '';
+    this.secret = opts.secret ?? '';
+    this.apiKey = opts.apiKey;
     this.baseUrl = (opts.baseUrl ?? 'https://plugipay.com').replace(/\/+$/, '');
     this.defaultOnBehalfOf = opts.onBehalfOf;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
@@ -100,8 +106,9 @@ export class PlugipayClient {
    *  across many merchants. */
   forMerchant(accountId: string): PlugipayClient {
     return new PlugipayClient({
-      keyId: this.keyId,
-      secret: this.secret,
+      keyId: this.keyId || undefined,
+      secret: this.secret || undefined,
+      apiKey: this.apiKey,
       baseUrl: this.baseUrl,
       onBehalfOf: accountId,
       timeoutMs: this.timeoutMs,
@@ -119,18 +126,22 @@ export class PlugipayClient {
     return { signature, timestamp: ts };
   }
 
-  async request<T>(args: FetchArgs): Promise<T> {
-    const bodyJson = args.body !== undefined ? JSON.stringify(args.body) : null;
-    const { signature, timestamp } = this.sign({
-      method: args.method,
-      path: args.path,
-      body: bodyJson,
-      idempotencyKey: args.idempotencyKey,
-    });
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
+  /** The credential headers: a dashboard key as Bearer, else the HMAC signature
+   *  (over the exact body bytes sent) and its timestamp. */
+  private authHeaders(input: SignInput): Record<string, string> {
+    if (this.apiKey) return { Authorization: `Bearer ${this.apiKey}` };
+    const { signature, timestamp } = this.sign(input);
+    return {
       Authorization: `Plugipay-HMAC-SHA256 keyId=${this.keyId}, scope=*, signature=${signature}`,
       'X-Plugipay-Timestamp': timestamp,
+    };
+  }
+
+  async request<T>(args: FetchArgs): Promise<T> {
+    const bodyJson = args.body !== undefined ? JSON.stringify(args.body) : null;
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      ...this.authHeaders({ method: args.method, path: args.path, body: bodyJson, idempotencyKey: args.idempotencyKey }),
       ...(bodyJson ? { 'Content-Type': 'application/json' } : {}),
       ...(args.idempotencyKey ? { 'Idempotency-Key': args.idempotencyKey } : {}),
     };
@@ -175,16 +186,9 @@ export class PlugipayClient {
   // `{ data, cursor, hasMore }`, so this helper re-shapes on the way out.
   private async requestList<T>(args: FetchArgs): Promise<{ data: T[]; cursor: string | null; hasMore: boolean }> {
     const bodyJson = args.body !== undefined ? JSON.stringify(args.body) : null;
-    const { signature, timestamp } = this.sign({
-      method: args.method,
-      path: args.path,
-      body: bodyJson,
-      idempotencyKey: args.idempotencyKey,
-    });
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      Authorization: `Plugipay-HMAC-SHA256 keyId=${this.keyId}, scope=*, signature=${signature}`,
-      'X-Plugipay-Timestamp': timestamp,
+      ...this.authHeaders({ method: args.method, path: args.path, body: bodyJson, idempotencyKey: args.idempotencyKey }),
       ...(bodyJson ? { 'Content-Type': 'application/json' } : {}),
       ...(args.idempotencyKey ? { 'Idempotency-Key': args.idempotencyKey } : {}),
     };
@@ -227,6 +231,25 @@ export class PlugipayClient {
 
   private genIdem(): string {
     return `idem_${crypto.randomUUID()}`;
+  }
+
+  /** Every feature route, one method each (generated from the API spec: api.generated.ts). */
+  readonly api: GeneratedApi = new GeneratedApi(this);
+
+  /** The call behind `client.api.*`: signed like every other request, with an
+   *  idempotency key on writes. */
+  async apigenRequest(method: string, path: string, query: Record<string, unknown> | undefined, body: unknown): Promise<unknown> {
+    const qs = query
+      ? new URLSearchParams(
+          Object.entries(query).map(([k, v]): [string, string] => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
+        ).toString()
+      : '';
+    return this.request<unknown>({
+      method: method as FetchArgs['method'],
+      path: qs ? `${path}?${qs}` : path,
+      body,
+      idempotencyKey: method === 'GET' ? undefined : this.genIdem(),
+    });
   }
 
   // ─── Resources ──────────────────────────────────────────────
@@ -562,6 +585,8 @@ export class PlugipayClient {
   };
 
   // ─── API keys ───────────────────────────────────────────────
+  /** Person-only: API keys are managed by a signed-in person in the dashboard; the API
+   *  answers a key here with 403 person_only (a key must not mint or revoke keys). */
   apiKeys = {
     list: () => this.request<ApiKey[]>({ method: 'GET', path: '/api/v1/api-keys' }),
     create: (input: { description?: string; scope?: string }) =>
@@ -627,6 +652,8 @@ export class PlugipayClient {
   };
 
   // ─── Workspaces (merchant-facing CRUD) ─────────────────────
+  /** `list` answers a key with its own workspace. `create` / `update` / `delete` are
+   *  person-only (they change the owner's Huudis account): 403 person_only with a key. */
   workspaces = {
     list: () => this.request<Workspace[]>({ method: 'GET', path: '/api/v1/workspaces' }),
     create: (input: { brandName?: string; businessEmail?: string }) =>
@@ -638,6 +665,8 @@ export class PlugipayClient {
   };
 
   // ─── Account (merchant profile + sessions + linked) ────────
+  /** Person-only: the owner's Huudis profile, sign-in and members, reached with their
+   *  signed-in session; the API answers a key here with 403 person_only. */
   account = {
     get: () => this.request<AccountProfile>({ method: 'GET', path: '/api/v1/account' }),
     update: (patch: Partial<{ name: string }>) =>
@@ -658,6 +687,7 @@ export class PlugipayClient {
   };
 
   // ─── Admin portal (Plugipay internal operators) ───────────
+  /** Plugipay's own operators only (an admin-portal session); a merchant key gets 401. */
   adminPortal = {
     me: () => this.request<AdminPortalIdentity>({ method: 'GET', path: '/api/v1/admin-portal/me' }),
     listBillingAccounts: () =>
