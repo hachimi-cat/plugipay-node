@@ -22,6 +22,8 @@ export class PlugipayError extends Error {
 }
 
 export type CurrencyCode = 'IDR' | 'USD';
+/** Test or live: a key's mode, and the mode its data belongs to. */
+export type Mode = 'live' | 'test';
 export type CheckoutMethod = 'qris' | 'va' | 'ewallet' | 'card' | 'retail' | 'paypal';
 
 export interface Customer {
@@ -283,14 +285,65 @@ export interface CashFlowReport {
 
 export interface WebhookEndpoint {
   id: string;
-  accountId: string;
+  /** Only returned on create. */
+  accountId?: string;
+  /** The mode of the request that made it: it receives only that mode's events. */
+  mode: Mode;
   url: string;
   events: string[];
   description: string | null;
   active: boolean;
+  /** Failed delivery attempts in a row since the last 2xx. */
+  consecutiveFailures: number;
+  /** When the current run of failures started; null while healthy. */
+  failingSince: string | null;
+  /** Set when Plugipay switched the endpoint off because it kept failing (20 failed
+   *  attempts in a row over at least 24 hours); null for a manual pause. Re-enable with
+   *  `webhookEndpoints.update(id, { active: true })`. */
+  disabledAt: string | null;
+  disabledReason: string | null;
   secret?: string; // only returned on create
   createdAt: string;
   updatedAt: string;
+}
+
+export type WebhookDeliveryStatus = 'pending' | 'succeeded' | 'failed';
+
+/** One try at a webhook delivery. */
+export interface WebhookDeliveryAttempt {
+  attemptNumber: number;
+  status: 'succeeded' | 'failed';
+  /** null when no response came back (a timeout, a refused connection). */
+  responseCode: number | null;
+  durationMs: number;
+  /** Why it failed: "HTTP 503", "timed out after 10000ms", … */
+  error: string | null;
+  /** The retry this failure scheduled; null on success or when it gave up. */
+  nextRetryAt: string | null;
+  attemptedAt: string;
+}
+
+/** One event sent to one endpoint (`webhookEndpoints.listDeliveries`). */
+export interface WebhookDelivery {
+  id: string;
+  endpointId: string;
+  /** The event's id (evt_…): the body's `id`, the same on every attempt. */
+  eventId: string;
+  type: string;
+  /** The exact JSON sent on every attempt. */
+  body: string;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  /** When it is next due; null once succeeded or failed. */
+  nextRetryAt: string | null;
+  lastAttemptAt: string | null;
+  deliveredAt: string | null;
+  responseCode: number | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Every attempt, oldest first. */
+  attemptLog: WebhookDeliveryAttempt[];
 }
 
 export interface EventRecord {
@@ -456,16 +509,18 @@ export interface ManagedOnboardingState {
   updatedAt: string;
 }
 
+/** A dashboard API key (`pk_test_…` / `pk_live_…`). Revoking deletes it. */
 export interface ApiKey {
   id: string;
-  accountId: string;
-  keyId: string;
-  description: string | null;
-  scope: string;
-  /** Only returned on create. */
-  secret?: string;
+  name: string;
+  /** The key's first 12 characters, to tell keys apart (`pk_live_3f9a`). */
+  keyPrefix: string;
+  environment: Mode;
+  scopes: string[];
+  lastUsedAt: string | null;
   createdAt: string;
-  revokedAt: string | null;
+  /** The whole key — only returned on create. */
+  key?: string;
 }
 
 export type TemplateKind = 'checkout' | 'receipt' | 'invoice';
@@ -574,10 +629,29 @@ export interface WorkspaceMember {
   joinedAt: string;
 }
 
+/** One of Plugipay's own plans (`billing.listTiers`). A limit of `null` is unlimited. */
 export interface BillingTier {
-  id: string;
+  id: 'starter' | 'growth' | 'scale' | 'enterprise';
   name: string;
-  monthly: number;
+  /** IDR per month; null when negotiated. */
+  priceMonthlyIdr: number | null;
+  /** USD cents per month for merchants billed in USD; null when the tier has no USD price. */
+  priceMonthlyUsdCents: number | null;
+  /** Plugipay's fee per transaction, 0–1. */
+  channelFeeRate: number;
+  monthlyTxnCap: number | null;
+  maxWebhookEndpoints: number | null;
+  maxApiKeys: number | null;
+  customBranding: boolean;
+  dailyPayouts: boolean;
+  support: {
+    tier: 'community' | 'email' | 'priority' | 'dedicated';
+    responseHours: number | null;
+    sla: boolean;
+  };
+  tagline: string;
+  /** Monthly assistant credits the tier grants. */
+  agentCredits: number;
   features: string[];
 }
 

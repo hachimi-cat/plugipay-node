@@ -7,7 +7,7 @@ export interface ApigenTransport {
   apigenRequest(method: string, path: string, query: Record<string, unknown> | undefined, body: unknown): Promise<unknown>;
 }
 
-/** All 140 feature routes of the Plugipay API. */
+/** All 143 feature routes of the Plugipay API. */
 export class GeneratedApi {
   constructor(private readonly client: ApigenTransport) {}
 
@@ -909,6 +909,28 @@ export class GeneratedApi {
   /** Delete a webhook (DELETE /api/v1/webhooks/{id}) */
   webhooksDelete(id: string): Promise<unknown> {
     return this.call("DELETE", `/api/v1/webhooks/${encodeURIComponent(id)}`, {}, undefined);
+  }
+
+  /** List webhook deliveries. (GET /api/v1/webhooks/deliveries) */
+  webhooksDeliveries(input?: { "limit"?: number; "cursor"?: string; "endpointId"?: string; "status"?: "pending" | "succeeded" | "failed"; "type"?: string }): Promise<unknown> {
+    const all: Record<string, unknown> = { ...(input ?? {}) };
+    const query: Record<string, unknown> = {};
+    query["limit"] = all["limit"]; delete all["limit"];
+    query["cursor"] = all["cursor"]; delete all["cursor"];
+    query["endpointId"] = all["endpointId"]; delete all["endpointId"];
+    query["status"] = all["status"]; delete all["status"];
+    query["type"] = all["type"]; delete all["type"];
+    return this.call("GET", `/api/v1/webhooks/deliveries`, query, undefined);
+  }
+
+  /** Retry a webhook delivery. (POST /api/v1/webhooks/deliveries/{id}/retry) */
+  webhooksDeliveriesRetry(id: string): Promise<unknown> {
+    return this.call("POST", `/api/v1/webhooks/deliveries/${encodeURIComponent(id)}/retry`, {}, undefined);
+  }
+
+  /** Get a webhook delivery, with every attempt made at it. (GET /api/v1/webhooks/deliveries/{id}) */
+  webhooksGetDeliveries(id: string): Promise<unknown> {
+    return this.call("GET", `/api/v1/webhooks/deliveries/${encodeURIComponent(id)}`, {}, undefined);
   }
 
   /** List webhooks (GET /api/v1/webhooks) */

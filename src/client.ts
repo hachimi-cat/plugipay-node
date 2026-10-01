@@ -23,6 +23,8 @@ import {
   PnLReport,
   CashFlowReport,
   WebhookEndpoint,
+  WebhookDelivery,
+  WebhookDeliveryStatus,
   EventRecord,
   ReceiptSummary,
   Refund,
@@ -496,8 +498,23 @@ export class PlugipayClient {
     list: () => this.request<WebhookEndpoint[]>({ method: 'GET', path: `/api/v1/webhooks` }),
     create: (input: { url: string; events?: string[]; description?: string }) =>
       this.request<WebhookEndpoint>({ method: 'POST', path: `/api/v1/webhooks`, body: input, idempotencyKey: this.genIdem() }),
+    /** Change url / events / description, or pause (`active: false`, its queued deliveries
+     *  fail) and re-enable (`active: true`, also after Plugipay switched it off for failing;
+     *  clears the failure streak). */
+    update: (id: string, input: { url?: string; events?: string[]; description?: string; active?: boolean }) =>
+      this.request<WebhookEndpoint>({ method: 'PATCH', path: `/api/v1/webhooks/${encodeURIComponent(id)}`, body: input }),
     delete: (id: string) =>
       this.request<void>({ method: 'DELETE', path: `/api/v1/webhooks/${id}` }),
+    /** The delivery log, newest first: one row per event per endpoint with every attempt.
+     *  Page with `cursor` while `hasMore`. */
+    listDeliveries: (params: { limit?: number; cursor?: string; endpointId?: string; status?: WebhookDeliveryStatus; type?: string } = {}) =>
+      this.requestList<WebhookDelivery>({ method: 'GET', path: `/api/v1/webhooks/deliveries${qs(params)}` }),
+    getDelivery: (id: string) =>
+      this.request<WebhookDelivery>({ method: 'GET', path: `/api/v1/webhooks/deliveries/${encodeURIComponent(id)}` }),
+    /** Queue one more attempt now at a failed delivery (or send a succeeded one again); it
+     *  goes out within seconds. 409 `already_queued` / `endpoint_disabled`. */
+    retryDelivery: (id: string) =>
+      this.request<WebhookDelivery>({ method: 'POST', path: `/api/v1/webhooks/deliveries/${encodeURIComponent(id)}/retry`, body: {} }),
   };
 
   events = {
