@@ -389,14 +389,14 @@ export interface Template {
   updatedAt: string;
 }
 
+/** An uploaded image (POST /api/v1/uploads/image). */
 export interface UploadedFile {
-  id: string;
-  accountId: string;
+  /** Where it is served: `/api/v1/files/<name>`, relative to plugipay.com. */
   url: string;
-  mime: string;
-  bytes: number;
-  filename: string;
-  createdAt: string;
+  /** The file name it was sent under. */
+  fileName: string;
+  /** Its size in bytes. */
+  fileSize: number;
 }
 
 export interface Workspace {

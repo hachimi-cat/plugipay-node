@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.0
+- `uploads.image` sends the image as `multipart/form-data` in the field `file`, which is what `POST /api/v1/uploads/image` takes; it sent JSON before and always got 400. It takes `{ file, filename?, contentType? }` (`file`: a Blob / File, Buffer or Uint8Array); the 0.8 shape `{ base64, filename, mime }` still works and is sent as the file it encodes. `UploadedFile` is what the API returns: `{ url, fileName, fileSize }` (it listed fields the API never sent).
+- `client.api.uploadsImage({ file })` and `client.api.publicCheckoutSessionsProofImage(id, { file })` upload a file (they took no arguments before); `request()` sends a `FormData` body as multipart/form-data, signed over no body as the API checks it.
+- Every request is signed with a fresh `X-Plugipay-Timestamp` when it is sent; the API now refuses a signed time more than 300 s off its clock either way (`401 timestamp_skew`, `401 invalid_timestamp`).
+
 ## 0.8.0
 - `client.api.<area><Action>(...)`: every Plugipay feature route, one method each, generated from the API spec (`scripts/apigen.sh`). Signed like every other request, with an idempotency key on writes.
 - `apiKey` option: a key minted in the dashboard (`pk_live_…` / `pk_test_…`) is sent as `Authorization: Bearer <key>`; `keyId` + `secret` are now optional when `apiKey` is given.

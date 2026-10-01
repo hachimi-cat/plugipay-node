@@ -16,6 +16,17 @@ export class GeneratedApi {
     return this.client.apigenRequest(method, path, Object.keys(q).length ? q : undefined, body);
   }
 
+  /** A file upload's body: a FormData with each file (a Blob; a File keeps its name) and
+   *  the other fields as text. The client's apigenRequest sends a FormData as it is. */
+  private form(fields: Record<string, unknown>): FormData {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === undefined || v === null) continue;
+      form.append(k, v instanceof Blob ? v : typeof v === 'string' ? v : JSON.stringify(v));
+    }
+    return form;
+  }
+
   /** Delete account (DELETE /api/v1/account) */
   accountDelete(input?: { [field: string]: unknown }): Promise<unknown> {
     const all: Record<string, unknown> = { ...(input ?? {}) };
@@ -673,9 +684,11 @@ export class GeneratedApi {
     return this.call("POST", `/api/v1/public/checkout/sessions/${encodeURIComponent(id)}/charge`, query, all);
   }
 
-  /** Proof image a session (POST /api/v1/public/checkout/sessions/{id}/proof-image) */
-  publicCheckoutSessionsProofImage(id: string): Promise<unknown> {
-    return this.call("POST", `/api/v1/public/checkout/sessions/${encodeURIComponent(id)}/proof-image`, {}, undefined);
+  /** Upload the buyer's transfer receipt (PNG, JPEG or WEBP, at most 4 MB) for a session awaiting manual review. (POST /api/v1/public/checkout/sessions/{id}/proof-image) */
+  publicCheckoutSessionsProofImage(id: string, input: { "file": Blob }): Promise<unknown> {
+    const all: Record<string, unknown> = { ...(input ?? {}) };
+    const query: Record<string, unknown> = {};
+    return this.call("POST", `/api/v1/public/checkout/sessions/${encodeURIComponent(id)}/proof-image`, query, this.form(all));
   }
 
   /** Public customer-facing receipt by session id. (GET /api/v1/public/checkout/sessions/{id}/receipt) */
@@ -874,9 +887,11 @@ export class GeneratedApi {
     return this.call("POST", `/api/v1/test/clocks/advance`, query, all);
   }
 
-  /** Create an image (POST /api/v1/uploads/image) */
-  uploadsImage(): Promise<unknown> {
-    return this.call("POST", `/api/v1/uploads/image`, {}, undefined);
+  /** Upload an image (PNG, JPEG or WEBP, at most 5 MB) as `multipart/form-data`, the file in the field `file` — a logo, a QRIS image. (POST /api/v1/uploads/image) */
+  uploadsImage(input: { "file": Blob }): Promise<unknown> {
+    const all: Record<string, unknown> = { ...(input ?? {}) };
+    const query: Record<string, unknown> = {};
+    return this.call("POST", `/api/v1/uploads/image`, query, this.form(all));
   }
 
   /** Create a webhook (POST /api/v1/webhooks) */

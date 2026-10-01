@@ -118,9 +118,10 @@ describe('v0.5.0 new resources', () => {
     expect(h.captured[0]!.url).toContain('/api/v1/templates/tpl_1/duplicate');
   });
 
-  it('uploads.image POSTs', async () => {
-    await h.client.uploads.image({ filename: 'logo.png', mime: 'image/png', base64: 'iVBOR...' });
+  it('uploads.image POSTs (multipart: test/uploads.test.ts)', async () => {
+    await h.client.uploads.image({ filename: 'logo.png', mime: 'image/png', base64: 'iVBORw0KGgo=' });
     expect(h.captured[0]!.url).toContain('/api/v1/uploads/image');
+    expect(h.captured[0]!.method).toBe('POST');
   });
 
   it('workspaces.create POSTs', async () => {

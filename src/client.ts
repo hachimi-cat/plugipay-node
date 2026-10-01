@@ -48,6 +48,15 @@ import {
   AdminPortalIdentity,
 } from './types.js';
 
+/** An image for `uploads.image`: its bytes, or (the 0.8 shape) base64 text. */
+export type UploadImageInput =
+  | { file: Blob | Uint8Array | ArrayBuffer; filename?: string; contentType?: string }
+  | { base64: string; filename: string; mime?: string };
+
+function isFormData(v: unknown): v is FormData {
+  return typeof FormData !== 'undefined' && v instanceof FormData;
+}
+
 export interface PlugipayClientOptions {
   /** HMAC access key id (e.g. 'ak_live_...'). With `secret`; or pass `apiKey`. */
   keyId?: string;
@@ -137,8 +146,12 @@ export class PlugipayClient {
     };
   }
 
+  /** Send a request, signed (with a fresh timestamp) as it is sent. `body` is sent as JSON,
+   *  or, when it is a FormData (a file upload), as multipart/form-data: the server hashes
+   *  no multipart body for the signature, so it is signed as an empty body. */
   async request<T>(args: FetchArgs): Promise<T> {
-    const bodyJson = args.body !== undefined ? JSON.stringify(args.body) : null;
+    const form = isFormData(args.body) ? args.body : null;
+    const bodyJson = !form && args.body !== undefined ? JSON.stringify(args.body) : null;
     const headers: Record<string, string> = {
       Accept: 'application/json',
       ...this.authHeaders({ method: args.method, path: args.path, body: bodyJson, idempotencyKey: args.idempotencyKey }),
@@ -155,7 +168,8 @@ export class PlugipayClient {
       res = await fetch(`${this.baseUrl}${args.path}`, {
         method: args.method,
         headers,
-        body: bodyJson ?? undefined,
+        // a FormData: fetch writes the multipart body and its Content-Type (with the boundary)
+        body: form ?? bodyJson ?? undefined,
         signal: ctrl.signal,
       });
     } catch (e) {
@@ -237,7 +251,7 @@ export class PlugipayClient {
   readonly api: GeneratedApi = new GeneratedApi(this);
 
   /** The call behind `client.api.*`: signed like every other request, with an
-   *  idempotency key on writes. */
+   *  idempotency key on writes. A file upload's body is a FormData, sent as it is. */
   async apigenRequest(method: string, path: string, query: Record<string, unknown> | undefined, body: unknown): Promise<unknown> {
     const qs = query
       ? new URLSearchParams(
@@ -646,9 +660,24 @@ export class PlugipayClient {
 
   // ─── Uploads ────────────────────────────────────────────────
   uploads = {
-    /** Upload an image. Pass the raw bytes + filename + mime. */
-    image: (input: { filename: string; mime: string; base64: string }) =>
-      this.request<UploadedFile>({ method: 'POST', path: '/api/v1/uploads/image', body: input }),
+    /**
+     * Upload an image (PNG, JPEG or WEBP, at most 5 MB): sent as multipart/form-data, the
+     * file in the field `file`. Pass the bytes (`file`: a Blob / File, a Buffer or
+     * Uint8Array) or, as before 0.9, `base64` + `filename`. Plugipay tells the type from
+     * the bytes. Returns the image's URL (relative, served by plugipay.com).
+     */
+    image: (input: UploadImageInput) => {
+      const i = (input && typeof input === 'object' ? input : {}) as {
+        file?: Blob | Uint8Array | ArrayBuffer; base64?: string; filename?: string; contentType?: string; mime?: string;
+      };
+      const type = i.contentType ?? i.mime;
+      const bytes = typeof i.base64 === 'string' ? Buffer.from(i.base64, 'base64') : i.file ?? new Uint8Array();
+      const blob = bytes instanceof Blob ? bytes : new Blob([bytes], type ? { type } : {});
+      const filename = i.filename ?? (typeof File !== 'undefined' && bytes instanceof File ? bytes.name : 'image');
+      const form = new FormData();
+      form.append('file', blob, filename);
+      return this.request<UploadedFile>({ method: 'POST', path: '/api/v1/uploads/image', body: form, idempotencyKey: this.genIdem() });
+    },
   };
 
   // ─── Workspaces (merchant-facing CRUD) ─────────────────────
